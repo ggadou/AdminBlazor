@@ -1,4 +1,9 @@
 @page "/Admin/User"
+@using AdminBlazor.Entities
+@using AdminBlazor.Infrastructure.ImportExports
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Hosting
+@using static AdminBlazor.Infrastructure.ImportExports.ImportExportsService
 
 <PageTitle>用户管理</PageTitle>
 
@@ -12,6 +17,9 @@
 
                 <CardHeader>
                     <button @onclick="ShowUserLogin" type="button" class="mr-2 btn btn-light btn-sm"><i class="fas fa-camera"></i> 登陆日志</button>
+                    <button @onclick="DownloadUserTemplate" type="button" class="mr-2 btn btn-light btn-sm"><i class="fas fa-file-lines"></i> 下载模板</button>
+                    <InputFile OnChange="OnFileChange" Accept=".xlsx" style="border: 1px solid #ccc;padding:4px;border-radius: 4px;"></InputFile>
+                    <button @onclick="ImportUsers" type="button" class="mr-2 btn btn-light btn-sm"><i class="fas fa-plus"></i> 导入用户</button>
                 </CardHeader>
 
                 <TableHeader>
@@ -91,6 +99,29 @@
     [Inject] IAggregateRootRepository<UserEntity> repo { get; set; }
     [Inject] AdminContext admin { get; set; }
 
+    [Inject]
+    IWebHostEnvironment? HostEnvironment { get; set; }
+    [Inject]
+    ToastService? ToastService { get; set; }
+    [Inject]
+    ImportExportsService? ImportExportsService { get; set; }
+    [Inject]
+    NavigationManager? NavigationManager { get; set; }
+
+    public bool IsExcel { get; set; }
+    protected string UploadPath = "";
+    protected string? uploadstatus;
+    long maxFileSize = 1024 * 1024 * 15;
+    string? tempfilename;
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            UploadPath = Path.Combine(HostEnvironment!.WebRootPath);
+            if (!Directory.Exists(UploadPath))
+                Directory.CreateDirectory(UploadPath);
+        }
+    }
     async Task InitQuery(AdminQueryInfo e)
     {
         var allRoleEntities = await repo.Orm.Select<RoleEntity>().ToListAsync();
@@ -135,6 +166,180 @@
     void ShowUserLogin()
     {
         showUserLogin = true;
+    }
+    [AdminButton("下载用户模板")]
+    async void DownloadUserTemplate()
+    {
+        await Export(exportTemplate: true);
+
+    }
+    private async Task Export(List<Dto_ImportUser>? items = null, ExportType exportType = ExportType.Excel, bool exportTemplate = false)
+    {
+        try
+        {
+            if (!exportTemplate && (items == null || !items.Any()))
+            {
+                ToastService?.Error($"导出", $"{exportType}出错,无数据可导出");
+                return;
+            }
+            var fileName = items == null ? $"ImportTemplate_User" : typeof(Dto_ImportUser).Name;
+
+            var fullName = Path.Combine(UploadPath, fileName);
+            fullName = await ImportExportsService.Export(fullName, items, exportType);
+            fileName = (new System.IO.FileInfo(fullName)).Name;
+            ToastService?.Success("提示", fileName + "已生成");
+
+            //下载后清除文件
+            NavigationManager.NavigateTo($"{fileName}", true);
+
+            _ = Task.Run(() =>
+            {
+                Thread.Sleep(50000);
+                System.IO.File.Delete(fullName);
+            });
+
+        }
+        catch (Exception e)
+        {
+            ToastService?.Error($"导出", $"{exportType}出错,请检查. {e.Message}");
+        }
+    }
+    private async void OnFileChange(InputFileChangeEventArgs e)
+    {
+        tempfilename = "";
+        if (e.File == null)
+            return;
+        if (e.File.Size > maxFileSize)
+        {
+            await ToastService.Show(new ToastOption()
+                {
+                    Category = ToastCategory.Success,
+                    Title = "提示",
+                    Content = $"文件大于{(maxFileSize / 1024 / 1024).ToString()}MB",
+                    IsAutoHide = true
+                });
+            return;
+        }
+        var fileEx = e.File.ContentType;
+        tempfilename = Path.Combine(UploadPath, e.File.Name);
+        System.Console.WriteLine("上传后的文件:", tempfilename);
+        await using FileStream fs = new(tempfilename, FileMode.Create);
+        using var stream = e.File.OpenReadStream(maxFileSize);
+        await stream.CopyToAsync(fs);
+        await ToastService.Show(new ToastOption()
+            {
+                Category = ToastCategory.Success,
+                Title = "提示",
+                Content = $"已经选择{e.File.Name}",
+                IsAutoHide = true
+            });
+
+        //50后清除文件
+        _ = Task.Run(() =>
+        {
+            Thread.Sleep(50000);
+            System.IO.File.Delete(tempfilename);
+        });
+    }
+
+
+    [AdminButton("导入用户")]
+    async void ImportUsers()
+    {
+        if (string.IsNullOrEmpty(tempfilename))
+        {
+            ToastService?.Error("提示", "请正确选择文件上传");
+            return;
+        }
+        var option = new ToastOption()
+            {
+                Category = ToastCategory.Information,
+                Title = "提示",
+                Content = "导入文件中,请稍等片刻...",
+                IsAutoHide = true
+            };
+        // 弹出 Toast
+        await ToastService!.Show(option);
+        await Task.Delay(100);
+        // 开启后台进程进行数据处理
+        var isSuccess = await ImportUserDataToDB();
+        //
+        await option.Close();
+        //
+        await ToastService.Show(new ToastOption()
+            {
+                Category = ToastCategory.Success,
+                Title = "提示",
+                Content = $"导入完毕",
+                IsAutoHide = true
+            });
+    }
+
+
+    private async Task<bool> ImportUserDataToDB()
+    {
+        var items_temp = await ImportExportsService!.ImportFormExcel<Dto_ImportUser>(tempfilename!);
+        if (items_temp.items == null)
+        {
+            ToastService?.Error("提示", "文件导入失败: " + items_temp.error);
+            return false;
+        }
+        var allRoleEntities = await repo.Orm.Select<RoleEntity>().ToListAsync();
+        int passcount = 0;
+        int failcount = 0;
+        foreach (var item in items_temp.items)
+        {
+            UserEntity user = new UserEntity();
+            RoleUserEntity roleuser = new RoleUserEntity();
+            //用户是否已经存在
+            var userIsExsites = await repo.Orm.Select<UserEntity>().Where(a => a.Username == item.Username).FirstAsync();
+            if (userIsExsites is not null)
+            {
+                await ToastService.Show(new ToastOption()
+                    {
+                        Category = ToastCategory.Success,
+                        Title = "提示",
+                        Content = $"{item.Username}{item.NickName}已存在",
+                        IsAutoHide = true
+                    });
+                failcount++;
+                continue;
+            }
+            user.Username = item.Username;
+            //判断role是否存在
+            var role = allRoleEntities.Find(a => a.Name == item.Role);
+            if (role is null)
+            {
+                await ToastService.Show(new ToastOption()
+                    {
+                        Category = ToastCategory.Success,
+                        Title = "提示",
+                        Content = $"{item.Username}{item.NickName}指定的角色{item.Role}不存在",
+                        IsAutoHide = true
+                    });
+                failcount++;
+                continue;
+            }
+            roleuser.RoleId = role.Id;
+            //写DB
+            user.Password = item.Password.ToString();
+            user.Nickname = item.NickName.ToString();
+            user.CreatedUserId = admin.User.Id;
+            user.CreatedUserName = admin.User.Username;
+            var retID = await repo.Orm.Insert(user).ExecuteAffrowsAsync();
+            var userid = await repo.Orm.Select<UserEntity>().Where(a => a.Username == user.Username).FirstAsync(a => a.Id);
+            roleuser.UserId = userid;
+            await repo.Orm.Insert(roleuser).ExecuteAffrowsAsync();
+            passcount++;
+        }
+        await ToastService.Show(new ToastOption()
+            {
+                Category = ToastCategory.Success,
+                Title = "提示",
+                Content = $"导入完毕,成功:{passcount},失败:{failcount}",
+                IsAutoHide = true
+            });
+        return true;
     }
     async Task InitQueryUserLogin(AdminQueryInfo e)
     {

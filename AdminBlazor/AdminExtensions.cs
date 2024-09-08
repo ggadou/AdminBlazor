@@ -1,4 +1,5 @@
-﻿using BootstrapBlazor.Components;
+﻿using AdminBlazor.Infrastructure.ImportExports;
+using BootstrapBlazor.Components;
 using FreeScheduler;
 using FreeSql;
 using FreeSql.Aop;
@@ -87,7 +88,8 @@ public static class AdminExtensions
                     Childs = new List<MenuEntity>
                     {
                         new MenuEntity { Label = "用户", Path = "Admin/User", Sort = 10001, Type = MenuEntityType.菜单, IsSystem = true, Childs = getCudButtons(
-                            new MenuEntity { Label = "分配角色", Path = "alloc_roles", Sort = 10014, Type = MenuEntityType.按钮, })
+                            new MenuEntity { Label = "分配角色", Path = "alloc_roles", Sort = 10014, Type = MenuEntityType.按钮, },
+                            new MenuEntity {Label="用户导入模板链接",Path="ImportTemplate_User.xlsx",Sort=10015,Type=MenuEntityType.外部连接})
                         },
                         new MenuEntity { Label = "角色", Path = "Admin/Role", Sort = 10002, Type = MenuEntityType.菜单, IsSystem = true, Childs = getCudButtons(
                             new MenuEntity { Label = "分配用户", Path = "alloc_users", Sort = 10014, Type = MenuEntityType.按钮, IsSystem = true, },
@@ -257,6 +259,8 @@ public static class AdminExtensions
         }
         #endregion
         services.AddSingleton(schedulerFactory);
+
+        services.AddTransient<ImportExportsService>();
 
         services.AddHttpContextAccessor();
         services.AddBootstrapBlazor();
